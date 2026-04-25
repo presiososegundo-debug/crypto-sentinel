@@ -8,7 +8,6 @@ import type { BrainEntry, TradeResult } from '../types/brain'
 
 interface Props {
   openTrade: BrainEntry | null
-  lastClosed: BrainEntry | null
   currentPrice: number
 }
 
@@ -100,7 +99,7 @@ function Row({ entry, livePrice }: { entry: BrainEntry; livePrice?: number }) {
 
 // ── Component ──────────────────────────────────────────────────────────────
 
-export function TradeHistory({ openTrade, lastClosed, currentPrice }: Props) {
+export function TradeHistory({ openTrade, currentPrice }: Props) {
   const [logEntries, setLogEntries] = useState<BrainEntry[]>(() => loadTradesLog())
 
   useEffect(() => {

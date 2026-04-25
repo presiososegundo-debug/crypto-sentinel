@@ -243,7 +243,7 @@ export function Dashboard() {
 
       {/* ── Registro de Trades ───────────────────────────── */}
       <div className="mt-3">
-        <TradeHistory openTrade={sim.openTrade} lastClosed={sim.lastClosed} currentPrice={currentPrice} />
+        <TradeHistory openTrade={sim.openTrade} currentPrice={currentPrice} />
       </div>
 
       {/* Footer */}
