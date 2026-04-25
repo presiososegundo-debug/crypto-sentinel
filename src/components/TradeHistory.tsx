@@ -115,9 +115,12 @@ export function TradeHistory({ openTrade, currentPrice }: Props) {
   )
 
   const closedEntries = allEntries.filter(e => e.resultado !== 'abierta')
-  const wins  = closedEntries.filter(e => e.resultado !== 'SL_tocado').length
-  const total = closedEntries.length
-  const wr    = total > 0 ? Math.round((wins / total) * 100) : null
+  const wins   = closedEntries.filter(e => e.resultado !== 'SL_tocado').length
+  const losses = closedEntries.filter(e => e.resultado === 'SL_tocado').length
+  const total  = closedEntries.length
+  const wr     = total > 0 ? Math.round((wins / total) * 100) : null
+  const roi    = closedEntries.reduce((sum, e) => sum + (e.pnlPct ?? 0), 0)
+  const roiColor = roi > 0 ? 'text-neon-green' : roi < 0 ? 'text-neon-red' : 'text-gray-500'
 
   return (
     <div className="bg-dark-card border border-dark-border rounded-lg overflow-hidden">
@@ -134,12 +137,33 @@ export function TradeHistory({ openTrade, currentPrice }: Props) {
               <span className={wr >= 60 ? 'text-neon-green' : wr >= 40 ? 'text-neon-yellow' : 'text-neon-red'}>
                 {wr}%
               </span>
-              <span className="text-gray-700 ml-1">({wins}/{total})</span>
+              <span className="text-gray-700 ml-1">({wins}W / {losses}L)</span>
             </span>
           )}
           <span className="text-gray-700">{total} trades</span>
         </div>
       </div>
+
+      {/* ── ROI total ── */}
+      {total > 0 && (
+        <div className="flex items-center justify-between px-4 py-2 border-b border-dark-border bg-dark-bg/40">
+          <span className="text-xs text-gray-500 uppercase tracking-widest">ROI acumulado</span>
+          <div className="flex items-center gap-4">
+            <span className={`text-lg font-black font-mono tabular-nums ${roiColor}`}
+              style={roi > 0 ? { textShadow: '0 0 12px #00ff8860' } : roi < 0 ? { textShadow: '0 0 12px #ff336660' } : {}}>
+              {roi >= 0 ? '+' : ''}{roi.toFixed(2)}%
+            </span>
+            <div className="text-xs text-gray-600 text-right leading-tight">
+              <div>Mejor: <span className="text-neon-green font-mono">
+                {closedEntries.length > 0 ? `+${Math.max(...closedEntries.map(e => e.pnlPct ?? 0)).toFixed(2)}%` : '—'}
+              </span></div>
+              <div>Peor: <span className="text-neon-red font-mono">
+                {closedEntries.length > 0 ? `${Math.min(...closedEntries.map(e => e.pnlPct ?? 0)).toFixed(2)}%` : '—'}
+              </span></div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Tabla con scroll ── */}
       <div className="overflow-y-auto" style={{ maxHeight: '200px' }}>
