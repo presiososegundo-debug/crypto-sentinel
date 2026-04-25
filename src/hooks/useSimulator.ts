@@ -210,7 +210,7 @@ export function useSimulator(
             marketCondition: `StaleEntry_${dir}`,
           },
         }
-        import('../utils/brainStorage').then(({ addBrainEntry }) => addBrainEntry(stalLesson))
+        addBrainEntry(stalLesson)
         lastTradeTimeRef.current = now  // cooldown para no reintentar inmediatamente
       }
 
