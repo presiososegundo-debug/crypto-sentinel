@@ -16,12 +16,13 @@ const HIGH_SCORE_THRESHOLD   = 76       // señal activa
 
 interface UseAnalysisProps {
   klines: Kline[]
+  currentKline: Kline | null
   currentPrice: number
   fundingRate: number | null
   timeframe?: string
 }
 
-export function useAnalysis({ klines, currentPrice, fundingRate, timeframe }: UseAnalysisProps): AnalysisSignal | null {
+export function useAnalysis({ klines, currentKline, currentPrice, fundingRate, timeframe }: UseAnalysisProps): AnalysisSignal | null {
   const [signal, setSignal]     = useState<AnalysisSignal | null>(null)
   const [weights, setWeights]   = useState<BrainWeights>(loadWeights)
   const lastPriceRef            = useRef<number>(0)
@@ -41,7 +42,11 @@ export function useAnalysis({ klines, currentPrice, fundingRate, timeframe }: Us
 
   const analyse = useCallback(() => {
     const currentWeights = loadWeights()
-    const result = runAnalysis({ klines, currentPrice, fundingRate }, currentWeights)
+    // Fusionar la vela en curso (live) con el historial de velas cerradas
+    const liveKlines = currentKline
+      ? [...klines.slice(0, -1), currentKline]
+      : klines
+    const result = runAnalysis({ klines: liveKlines, currentPrice, fundingRate }, currentWeights)
     setSignal(result)
     lastPriceRef.current = currentPrice
     lastCalcRef.current  = Date.now()
@@ -55,7 +60,7 @@ export function useAnalysis({ klines, currentPrice, fundingRate, timeframe }: Us
       // Solo forzar re-render de pesos si cambiaron (sequía disparó ajuste)
       if (updated.lastUpdated !== currentWeights.lastUpdated) setWeights(updated)
     }
-  }, [klines, currentPrice, fundingRate])
+  }, [klines, currentKline, currentPrice, fundingRate])
 
   useEffect(() => {
     if (klines.length < 20 || currentPrice === 0) return

@@ -14,7 +14,7 @@ import type { BrainWeights } from '../types/brain'
 // ─── Umbrales ─────────────────────────────────────────────────────────────────
 const VOLUME_SPIKE_MULT = 2.0    // volumen actual > 2× media → trigger
 const PRICE_SPIKE_PCT   = 0.15   // movimiento de precio > 0.15% → trigger
-const MAX_IDLE_MS       = 30_000 // trigger forzado cada 30s sin actividad
+const MAX_IDLE_MS       = 15_000 // trigger forzado cada 15s sin actividad
 
 export interface MarketSnapshot {
   triggerReason: 'volume_spike' | 'price_spike' | 'idle' | 'initial'

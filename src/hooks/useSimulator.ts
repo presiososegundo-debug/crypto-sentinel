@@ -16,6 +16,7 @@ import {
   logTradeOpen,
   logTradeClose,
 } from '../utils/brainStorage'
+import { notificarApertura, notificarCierre } from '../utils/telegramSender'
 import {
   evaluateSnapshot,
   createSnapshotState,
@@ -75,47 +76,30 @@ export function useSimulator(
         prev.adjustedScore, prev.snapshotState,
       )
 
-      // Sin snapshot → solo actualizar precios del trade abierto si hay uno
       if (!snapResult && prev.phase !== 'open') return prev
 
       const newSnapshotState = snapResult?.newState ?? prev.snapshotState
       const lastSnapshot     = snapResult?.snapshot ?? prev.lastSnapshot
+      const adjustedScore    = snapResult ? signal.score : prev.adjustedScore
 
-      // signal.score ya viene con pesos aplicados desde runAnalysis — usarlo directamente
-      // (applyBrainWeights duplicaría la aplicación de pesos)
-      const adjustedScore = snapResult ? signal.score : prev.adjustedScore
-
-      // ── 2. Si hay operación abierta — vigilar SL y TPs cada tick ─────────
+      // ── 2. Vigilar SL y TPs del trade abierto ────────────────────────────
       if (prev.phase === 'open' && prev.openTrade) {
-        const trade = prev.openTrade
+        const trade  = prev.openTrade
         const isLong = trade.direction === 'long'
 
         let resultado: TradeResult | null = null
         let exitPrice: number | null = null
 
-        // Comprobar SL
-        if (isLong && currentPrice <= trade.sl) {
-          resultado = 'SL_tocado'; exitPrice = trade.sl
-        } else if (!isLong && currentPrice >= trade.sl) {
-          resultado = 'SL_tocado'; exitPrice = trade.sl
-        }
-        // Comprobar TPs (TP3 primero para dar el mayor objetivo posible)
-        else if (trade.tp3 !== null && isLong  && currentPrice >= trade.tp3) {
-          resultado = 'TP3'; exitPrice = trade.tp3
-        } else if (trade.tp3 !== null && !isLong && currentPrice <= trade.tp3) {
-          resultado = 'TP3'; exitPrice = trade.tp3
-        } else if (trade.tp2 !== null && isLong  && currentPrice >= trade.tp2) {
-          resultado = 'TP2'; exitPrice = trade.tp2
-        } else if (trade.tp2 !== null && !isLong && currentPrice <= trade.tp2) {
-          resultado = 'TP2'; exitPrice = trade.tp2
-        } else if (isLong  && currentPrice >= trade.tp1) {
-          resultado = 'TP1'; exitPrice = trade.tp1
-        } else if (!isLong && currentPrice <= trade.tp1) {
-          resultado = 'TP1'; exitPrice = trade.tp1
-        }
+        if      (isLong  && currentPrice <= trade.sl)  { resultado = 'SL_tocado'; exitPrice = trade.sl }
+        else if (!isLong && currentPrice >= trade.sl)  { resultado = 'SL_tocado'; exitPrice = trade.sl }
+        else if (trade.tp3 !== null && isLong  && currentPrice >= trade.tp3) { resultado = 'TP3'; exitPrice = trade.tp3 }
+        else if (trade.tp3 !== null && !isLong && currentPrice <= trade.tp3) { resultado = 'TP3'; exitPrice = trade.tp3 }
+        else if (trade.tp2 !== null && isLong  && currentPrice >= trade.tp2) { resultado = 'TP2'; exitPrice = trade.tp2 }
+        else if (trade.tp2 !== null && !isLong && currentPrice <= trade.tp2) { resultado = 'TP2'; exitPrice = trade.tp2 }
+        else if (isLong  && currentPrice >= trade.tp1) { resultado = 'TP1'; exitPrice = trade.tp1 }
+        else if (!isLong && currentPrice <= trade.tp1) { resultado = 'TP1'; exitPrice = trade.tp1 }
 
         if (resultado && exitPrice !== null) {
-          // ── Cerrar operación ────────────────────────────────────────────
           const pnlPct = isLong
             ? ((exitPrice - trade.entry) / trade.entry) * 100
             : ((trade.entry - exitPrice) / trade.entry) * 100
@@ -132,121 +116,77 @@ export function useSimulator(
             updatedBrain = loadBrain()
           }
 
-          // Guardar en el log completo (todos los trades sin filtros)
           logTradeClose(closedTrade.id, { resultado, exitPrice, pnlPct, postMortem: closedTrade.postMortem ?? null })
-
+          notificarCierre({ ...closedTrade, pnlPct })
           lastTradeTimeRef.current = Date.now()
 
           return {
-            ...prev,
-            phase: 'closed',
-            openTrade: null,
-            lastClosed: closedTrade,
-            brain: updatedBrain,
-            lastSnapshot,
-            snapshotState: newSnapshotState,
-            adjustedScore,
+            ...prev, phase: 'closed', openTrade: null,
+            lastClosed: closedTrade, brain: updatedBrain,
+            lastSnapshot, snapshotState: newSnapshotState, adjustedScore,
           }
         }
 
-        // Operación abierta sin hit — actualizar snapshot state
         return { ...prev, lastSnapshot, snapshotState: newSnapshotState, adjustedScore }
       }
 
-      // ── 3. Sin operación abierta — evaluar si abrir una nueva ─────────────
+      // ── 3. Evaluar apertura ───────────────────────────────────────────────
       if (!snapResult) return { ...prev, snapshotState: newSnapshotState, adjustedScore }
 
-      const now = Date.now()
+      const now         = Date.now()
       const cooldownOk  = now - lastTradeTimeRef.current > COOLDOWN_MS
       const signalFresh = (now - (signal.timestamp ?? 0)) < SIGNAL_MAX_AGE_MS
-
       const entry = signal.suggestedEntry
       const sl    = signal.suggestedSL
       const tp1   = signal.suggestedTP1
       const dir   = signal.direction
 
-      // Validar geometría: el precio actual debe estar en zona de entrada válida
-      // LONG:  precio actual < TP1  (no entrar si ya superó el objetivo)
-      //        SL < entrada         (SL debe estar por debajo)
-      // SHORT: precio actual > TP1  (no entrar si ya bajó al objetivo)
-      //        SL > entrada         (SL debe estar por encima)
       const geometryOk = entry !== null && sl !== null && tp1 !== null && (
-        dir === 'long'
-          ? currentPrice < tp1 && sl < entry
-          : currentPrice > tp1 && sl > entry
+        dir === 'long' ? currentPrice < tp1 && sl < entry : currentPrice > tp1 && sl > entry
       )
 
       const canOpen = adjustedScore >= CONFIDENCE_THRESHOLD
                    && dir !== 'neutral'
                    && entry !== null && sl !== null && tp1 !== null
-                   && cooldownOk
-                   && signalFresh
-                   && geometryOk
+                   && cooldownOk && signalFresh && geometryOk
 
-      // Si score es alto pero la señal es inválida → enseñar al brain
       if (adjustedScore >= CONFIDENCE_THRESHOLD && dir !== 'neutral' && entry !== null && (!signalFresh || !geometryOk)) {
         const reason = !signalFresh ? 'Señal vencida — precio se movió antes de la apertura.' : 'Precio ya superó el TP1 — entrada tardía descartada.'
-        const stalLesson: import('../types/brain').BrainEntry = {
-          id: shortId(),
-          timestamp: now,
+        addBrainEntry({
+          id: shortId(), timestamp: now,
           escenario: `StaleEntry_${dir === 'long' ? 'Long' : 'Short'}`,
-          direction: dir as 'long' | 'short',
-          score: adjustedScore,
+          direction: dir as 'long' | 'short', score: adjustedScore,
           scoreBreakdown: { ...signal.scoreBreakdown },
-          entry: entry!,
-          sl: sl ?? entry!,
-          tp1: tp1 ?? entry!,
-          tp2: signal.suggestedTP2,
-          tp3: signal.suggestedTP3,
-          resultado: 'SL_tocado',
-          exitPrice: currentPrice,
-          pnlPct: 0,
+          entry: entry!, sl: sl ?? entry!, tp1: tp1 ?? entry!,
+          tp2: signal.suggestedTP2, tp3: signal.suggestedTP3,
+          resultado: 'SL_tocado', exitPrice: currentPrice, pnlPct: 0,
           postMortem: {
-            failedIndicators: ['estructura'],
-            lesson: reason,
-            ajuste: 'No abrir operaciones cuando el precio ya superó el nivel de TP1 o la señal tiene más de 30s.',
-            fundingAtExit: fundingRate,
-            volumeAtEntry: 0,
-            marketCondition: `StaleEntry_${dir}`,
+            failedIndicators: ['estructura'], lesson: reason,
+            ajuste: 'No abrir cuando el precio ya superó TP1 o señal >30s.',
+            fundingAtExit: fundingRate, volumeAtEntry: 0, marketCondition: `StaleEntry_${dir}`,
           },
-        }
-        addBrainEntry(stalLesson)
-        lastTradeTimeRef.current = now  // cooldown para no reintentar inmediatamente
+        })
+        lastTradeTimeRef.current = now
       }
 
-      if (!canOpen) {
-        return { ...prev, lastSnapshot, snapshotState: newSnapshotState, adjustedScore }
-      }
+      if (!canOpen) return { ...prev, lastSnapshot, snapshotState: newSnapshotState, adjustedScore }
 
-      // ── Abrir operación simulada ─────────────────────────────────────────
       const newTrade: BrainEntry = {
-        id: shortId(),
-        timestamp: now,
+        id: shortId(), timestamp: now,
         escenario: buildEscenario(signal, fundingRate),
         direction: signal.direction as 'long' | 'short',
-        score: adjustedScore,
-        scoreBreakdown: { ...signal.scoreBreakdown },
-        entry: signal.suggestedEntry!,
-        sl:    signal.suggestedSL!,
-        tp1:   signal.suggestedTP1!,
-        tp2:   signal.suggestedTP2,
-        tp3:   signal.suggestedTP3,
-        resultado: 'abierta',
-        exitPrice: null,
-        pnlPct: null,
-        postMortem: null,
+        score: adjustedScore, scoreBreakdown: { ...signal.scoreBreakdown },
+        entry: signal.suggestedEntry!, sl: signal.suggestedSL!,
+        tp1: signal.suggestedTP1!, tp2: signal.suggestedTP2, tp3: signal.suggestedTP3,
+        resultado: 'abierta', exitPrice: null, pnlPct: null, postMortem: null,
       }
 
-      // Registrar apertura en el log completo
       logTradeOpen(newTrade)
+      notificarApertura(newTrade)
 
       return {
-        ...prev,
-        phase: 'open',
-        openTrade: newTrade,
-        lastSnapshot,
-        snapshotState: newSnapshotState,
-        adjustedScore,
+        ...prev, phase: 'open', openTrade: newTrade,
+        lastSnapshot, snapshotState: newSnapshotState, adjustedScore,
       }
     })
   }, [currentPrice, klines, currentKline, fundingRate, signal])

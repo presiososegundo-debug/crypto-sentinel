@@ -25,6 +25,7 @@ export function Dashboard() {
 
   const signal = useAnalysis({
     klines,
+    currentKline,
     currentPrice,
     fundingRate: funding.fundingRate,
     timeframe,
