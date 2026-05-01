@@ -10,6 +10,7 @@ import type {
   FairValueGap,
   AnalysisSignal,
   MarketContext,
+  WyckoffSignal,
 } from '../types/analysis'
 import type { BrainWeights } from '../types/brain'
 import { DEFAULT_WEIGHTS } from '../types/brain'
@@ -116,7 +117,103 @@ export function detectStopHunt(klines: Kline[], swings: SwingPoint[], minWickPct
   return null
 }
 
-// ─── 3. Detectar Order Blocks activos ────────────────────────────────────────
+// ─── 3. Detectar estructuras Wyckoff: Spring (Long) y UTAD (Short) ───────────
+/**
+ * Spring: vela baja bajo soporte, cierra por encima → trampa bajista confirmada.
+ * UTAD:   vela sube sobre resistencia, cierra por debajo → trampa alcista confirmada.
+ *
+ * Regla de oro: si no hay evidencia clara, retorna null y la lógica original manda.
+ */
+export function detectWyckoff(
+  klines: Kline[],
+  swings: SwingPoint[],
+  direction: 'long' | 'short' | 'neutral',
+  minWickPct = 0.08,
+): WyckoffSignal | null {
+  if (klines.length < 5 || direction === 'neutral') return null
+
+  const recent = klines.slice(-6)   // las últimas 6 velas (incluye la actual)
+
+  // ── Spring (para Longs): barrido de mínimos con cierre por encima ───────────
+  if (direction === 'long') {
+    const recentLows = swings.filter(s => s.type === 'low').slice(-5)
+    if (recentLows.length === 0) return null
+
+    for (let ci = recent.length - 2; ci >= 0; ci--) {
+      const candle = recent[ci]
+      for (const swing of recentLows) {
+        if (swing.index >= klines.length - 6) continue   // swing demasiado reciente
+
+        const penetrated = candle.low < swing.price
+        const recovered  = candle.close > swing.price    // cierra por encima: Spring válido
+        if (!penetrated || !recovered) continue
+
+        const sweepPct = ((swing.price - candle.low) / swing.price) * 100
+        if (sweepPct < minWickPct) continue
+
+        // Confirmación: la vela siguiente cierra por encima del nivel
+        // ci <= recent.length-2 siempre, así que recent[ci+1] siempre existe
+        const nextCandle = recent[ci + 1]
+        const confirmed  = nextCandle.close > swing.price
+
+        const strength: WyckoffSignal['strength'] =
+          sweepPct > 0.4 && confirmed ? 'strong'
+          : sweepPct > 0.2 || confirmed ? 'moderate'
+          : 'weak'
+
+        return {
+          type: 'spring',
+          sweptLevel:  swing.price,
+          wickExtreme: candle.low,
+          sweepPct,
+          confirmed,
+          strength,
+        }
+      }
+    }
+  }
+
+  // ── UTAD (para Shorts): barrido de máximos con cierre por debajo ─────────────
+  if (direction === 'short') {
+    const recentHighs = swings.filter(s => s.type === 'high').slice(-5)
+    if (recentHighs.length === 0) return null
+
+    for (let ci = recent.length - 2; ci >= 0; ci--) {
+      const candle = recent[ci]
+      for (const swing of recentHighs) {
+        if (swing.index >= klines.length - 6) continue
+
+        const penetrated = candle.high > swing.price
+        const recovered  = candle.close < swing.price   // cierra por debajo: UTAD válido
+        if (!penetrated || !recovered) continue
+
+        const sweepPct = ((candle.high - swing.price) / swing.price) * 100
+        if (sweepPct < minWickPct) continue
+
+        const nextCandle = recent[ci + 1]
+        const confirmed  = nextCandle.close < swing.price
+
+        const strength: WyckoffSignal['strength'] =
+          sweepPct > 0.4 && confirmed ? 'strong'
+          : sweepPct > 0.2 || confirmed ? 'moderate'
+          : 'weak'
+
+        return {
+          type: 'utad',
+          sweptLevel:  swing.price,
+          wickExtreme: candle.high,
+          sweepPct,
+          confirmed,
+          strength,
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+// ─── 4. Detectar Order Blocks activos ────────────────────────────────────────
 export function detectOrderBlocks(klines: Kline[], currentPrice: number): OrderBlock[] {
   const obs: OrderBlock[] = []
   const len = klines.length
@@ -307,7 +404,17 @@ function buildTooltip(
   return parts.join(' ')
 }
 
-// ─── 8. PUNTO DE ENTRADA PRINCIPAL ───────────────────────────────────────────
+// ─── 8. Score Wyckoff ─────────────────────────────────────────────────────────
+function calcWyckoffBonus(wyckoff: WyckoffSignal | null, weight = 1.0): number {
+  if (!wyckoff) return 0
+  const base = wyckoff.strength === 'strong' ? 12
+             : wyckoff.strength === 'moderate' ? 7
+             : 3
+  const confirmBonus = wyckoff.confirmed ? 4 : 0
+  return Math.round((base + confirmBonus) * weight)
+}
+
+// ─── 9. PUNTO DE ENTRADA PRINCIPAL ───────────────────────────────────────────
 export function runAnalysis(ctx: MarketContext, weights: BrainWeights = DEFAULT_WEIGHTS): AnalysisSignal {
   const { klines, currentPrice, fundingRate } = ctx
 
@@ -315,7 +422,7 @@ export function runAnalysis(ctx: MarketContext, weights: BrainWeights = DEFAULT_
     return {
       direction: 'neutral', score: 0,
       label: 'Cargando datos...', tooltip: 'Esperando suficientes velas para analizar.',
-      stopHunt: null, nearestOB: null, nearestFVG: null,
+      stopHunt: null, wyckoff: null, nearestOB: null, nearestFVG: null,
       scoreBreakdown: { stopHuntScore: 0, orderBlockScore: 0, fundingScore: 0 },
       suggestedEntry: null, suggestedSL: null,
       suggestedTP1: null, suggestedTP2: null, suggestedTP3: null,
@@ -325,32 +432,60 @@ export function runAnalysis(ctx: MarketContext, weights: BrainWeights = DEFAULT_
 
   // Detectar estructuras usando el minWickPct adaptativo del brain
   const swings = detectSwings(klines)
-  const hunt = detectStopHunt(klines, swings, weights.minWickPct)
-  const obs = detectOrderBlocks(klines, currentPrice)
-  const fvgs = detectFVGs(klines, currentPrice)
+  const hunt   = detectStopHunt(klines, swings, weights.minWickPct)
+  const obs    = detectOrderBlocks(klines, currentPrice)
+  const fvgs   = detectFVGs(klines, currentPrice)
 
   // Determinar dirección a partir del Stop Hunt
   let direction: 'long' | 'short' | 'neutral' = 'neutral'
   if (hunt) direction = hunt.direction === 'bullish' ? 'long' : 'short'
 
+  // Detectar Spring / UTAD Wyckoff (requiere dirección ya determinada)
+  const wyckoff = detectWyckoff(klines, swings, direction, weights.minWickPct)
+
   // Buscar el OB más relevante para la dirección
-  const nearestOB = obs.find(o => o.type === (direction === 'long' ? 'bullish' : 'bearish')) ?? obs[0] ?? null
+  const nearestOB  = obs.find(o => o.type === (direction === 'long' ? 'bullish' : 'bearish')) ?? obs[0] ?? null
   const nearestFVG = fvgs.find(f => f.type === (direction === 'long' ? 'bullish' : 'bearish')) ?? null
 
   // Calcular scores aplicando pesos adaptativos del brain
-  const stopHuntScore  = calcStopHuntScore(hunt, weights.stopHuntWeight)
+  const stopHuntScore   = calcStopHuntScore(hunt, weights.stopHuntWeight)
   const orderBlockScore = calcOBScore(nearestOB, weights.orderBlockWeight)
-  const fundingScore   = calcFundingScore(fundingRate, direction, weights.fundingWeight)
-  const rawScore = stopHuntScore + orderBlockScore + fundingScore
+  const fundingScore    = calcFundingScore(fundingRate, direction, weights.fundingWeight)
+
+  // Wyckoff bonus solo si detectó un nivel DISTINTO al del Stop Hunt
+  // (evitar doble conteo del mismo barrido de liquidez)
+  const wyckoffIsNewEvent = wyckoff !== null && (
+    !hunt || Math.abs(wyckoff.sweptLevel - hunt.sweptPrice) > currentPrice * 0.001
+  )
+  const wyckoffBonus = calcWyckoffBonus(wyckoffIsNewEvent ? wyckoff : null, weights.wyckoffWeight)
+
+  const rawScore = stopHuntScore + orderBlockScore + fundingScore + wyckoffBonus
   const score = Math.max(1, Math.min(100, rawScore))
 
   // Calcular niveles de Fibonacci
   let fibs = { tp1: null as number | null, tp2: null as number | null, tp3: null as number | null, sl: null as number | null }
   if (hunt && direction !== 'neutral') {
     const recentHigh = Math.max(...klines.slice(-20).map(c => c.high))
-    const recentLow = Math.min(...klines.slice(-20).map(c => c.low))
+    const recentLow  = Math.min(...klines.slice(-20).map(c => c.low))
     const f = calcFibonacci(recentHigh, recentLow, direction)
     fibs = { tp1: f.tp1, tp2: f.tp2, tp3: f.tp3, sl: f.sl }
+  }
+
+  // Refinamiento Wyckoff del SL: si hay Spring/UTAD confirmado, el SL va
+  // justo más allá del extremo de la mecha (zona de seguridad real).
+  // Solo se aplica si la señal Wyckoff es moderate/strong — preserva el SL
+  // Fibonacci cuando la señal es débil (regla de oro: no bloquear si no es seguro).
+  let suggestedSL = fibs.sl
+  if (wyckoff && wyckoff.strength !== 'weak' && fibs.sl !== null) {
+    const buffer = currentPrice * 0.001   // 0.1% de margen de seguridad
+    const wyckoffSL = direction === 'long'
+      ? wyckoff.wickExtreme - buffer       // Spring: SL bajo el mínimo absoluto de la mecha
+      : wyckoff.wickExtreme + buffer       // UTAD: SL sobre el máximo absoluto de la mecha
+
+    // Usar el SL Wyckoff solo si es más seguro que el Fibonacci
+    // (más bajo para longs, más alto para shorts)
+    if (direction === 'long' && wyckoffSL < (fibs.sl ?? Infinity)) suggestedSL = wyckoffSL
+    if (direction === 'short' && wyckoffSL > (fibs.sl ?? -Infinity)) suggestedSL = wyckoffSL
   }
 
   return {
@@ -359,11 +494,12 @@ export function runAnalysis(ctx: MarketContext, weights: BrainWeights = DEFAULT_
     label: buildLabel(score, hunt),
     tooltip: buildTooltip(hunt, nearestOB, fundingRate, direction),
     stopHunt: hunt,
+    wyckoff,
     nearestOB,
     nearestFVG,
     scoreBreakdown: { stopHuntScore, orderBlockScore, fundingScore },
     suggestedEntry: hunt ? currentPrice : null,
-    suggestedSL: fibs.sl,
+    suggestedSL,
     suggestedTP1: fibs.tp1,
     suggestedTP2: fibs.tp2,
     suggestedTP3: fibs.tp3,

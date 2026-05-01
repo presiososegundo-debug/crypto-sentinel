@@ -46,10 +46,11 @@ function WeightBar({ label, value, icon }: { label: string; value: number; icon:
 
 function IndicatorTag({ ind }: { ind: FailedIndicator }) {
   const cfg: Record<FailedIndicator, { label: string; cls: string }> = {
-    stopHunt:   { label: '⚡ Stop Hunt débil', cls: 'bg-purple-900/40 text-purple-300 border-purple-700/40' },
-    orderBlock: { label: '📦 OB ausente',      cls: 'bg-blue-900/40 text-blue-300 border-blue-700/40' },
-    funding:    { label: '💸 Funding adverso', cls: 'bg-orange-900/40 text-orange-300 border-orange-700/40' },
-    estructura: { label: '📉 Estructura',      cls: 'bg-gray-800 text-gray-400 border-gray-700' },
+    stopHunt:   { label: '⚡ Stop Hunt débil',   cls: 'bg-purple-900/40 text-purple-300 border-purple-700/40' },
+    orderBlock: { label: '📦 OB ausente',         cls: 'bg-blue-900/40 text-blue-300 border-blue-700/40' },
+    funding:    { label: '💸 Funding adverso',    cls: 'bg-orange-900/40 text-orange-300 border-orange-700/40' },
+    estructura: { label: '📉 Estructura',          cls: 'bg-gray-800 text-gray-400 border-gray-700' },
+    wyckoff:    { label: '🌊 Sin Spring/UTAD',    cls: 'bg-cyan-900/40 text-cyan-300 border-cyan-700/40' },
   }
   const { label, cls } = cfg[ind]
   return <span className={`text-xs px-1.5 py-0.5 rounded border ${cls}`}>{label}</span>
@@ -235,10 +236,29 @@ export function BrainPanel({ sim, currentPrice, onReset }: Props) {
             <WeightBar label="Stop Hunt"   value={weights.stopHuntWeight}   icon="⚡" />
             <WeightBar label="Order Block" value={weights.orderBlockWeight} icon="📦" />
             <WeightBar label="Funding Rate" value={weights.fundingWeight}   icon="💸" />
+            <WeightBar label="Wyckoff S/U"  value={weights.wyckoffWeight}   icon="🌊" />
 
             <div className="flex justify-between text-xs border-t border-dark-border pt-2">
               <span className="text-gray-500">Umbral de mecha</span>
               <span className="text-white font-mono">{(weights.minWickPct).toFixed(3)}%</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-500">R:B mínimo</span>
+              <span className={`font-mono ${(weights.minRR ?? 0.7) <= 0.40 ? 'text-neon-yellow' : 'text-gray-300'}`}>
+                {(weights.minRR ?? 0.7).toFixed(2)}:1{(weights.minRR ?? 0.7) <= 0.40 ? ' ⚡ relajado' : ''}
+              </span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-500">Hold TP1→TP2</span>
+              <span className={`font-mono ${weights.tp1HoldRate >= 0.60 ? 'text-neon-green font-bold' : 'text-gray-400'}`}>
+                {(weights.tp1HoldRate * 100).toFixed(0)}%{weights.tp1HoldRate >= 0.60 ? ' ▶ saltando TP1' : ''}
+              </span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-500">Hold TP2→TP3</span>
+              <span className={`font-mono ${weights.tp2HoldRate >= 0.60 ? 'text-neon-green font-bold' : 'text-gray-400'}`}>
+                {(weights.tp2HoldRate * 100).toFixed(0)}%{weights.tp2HoldRate >= 0.60 ? ' ▶ saltando TP2' : ''}
+              </span>
             </div>
             {weights.lastUpdated > 0 && (
               <p className="text-xs text-gray-600">

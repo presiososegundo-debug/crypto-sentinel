@@ -45,6 +45,19 @@ export interface FairValueGap {
   filled: boolean
 }
 
+// ─── Wyckoff Spring / UTAD ───────────────────────────────────────────────────
+export type WyckoffType = 'spring' | 'utad'
+export type WyckoffStrength = 'weak' | 'moderate' | 'strong'
+
+export interface WyckoffSignal {
+  type: WyckoffType
+  sweptLevel: number      // nivel de soporte/resistencia barrido
+  wickExtreme: number     // extremo absoluto de la mecha (para colocar SL)
+  sweepPct: number        // % de penetración del nivel
+  confirmed: boolean      // true si la vela siguiente confirma la reversión
+  strength: WyckoffStrength
+}
+
 // ─── Señal Final ──────────────────────────────────────────────────────────────
 export type SignalDirection = 'long' | 'short' | 'neutral'
 export interface AnalysisSignal {
@@ -53,6 +66,7 @@ export interface AnalysisSignal {
   label: string             // texto del alerta
   tooltip: string           // explicación humana
   stopHunt: StopHunt | null
+  wyckoff: WyckoffSignal | null
   nearestOB: OrderBlock | null
   nearestFVG: FairValueGap | null
   scoreBreakdown: {

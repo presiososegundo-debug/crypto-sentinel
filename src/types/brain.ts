@@ -9,7 +9,7 @@ export type Escenario = string
 
 export type TradeResult = 'SL_tocado' | 'TP1' | 'TP2' | 'TP3' | 'abierta'
 
-export type FailedIndicator = 'stopHunt' | 'orderBlock' | 'funding' | 'estructura'
+export type FailedIndicator = 'stopHunt' | 'orderBlock' | 'funding' | 'estructura' | 'wyckoff'
 
 // ─── Registro individual en brain.json ───────────────────────────────────────
 export interface BrainEntry {
@@ -50,6 +50,10 @@ export interface BrainWeights {
   orderBlockWeight: number
   fundingWeight: number
   minWickPct: number        // umbral mínimo de mecha para considerar SH válido
+  tp1HoldRate: number        // 0.0–1.0 — % histórico de veces que precio llegó a TP2 tras TP1
+  tp2HoldRate: number        // 0.0–1.0 — % histórico de veces que precio llegó a TP3 tras TP2
+  wyckoffWeight: number      // 0.5–1.5 — peso del filtro Wyckoff (sube cuando confirma, baja cuando falla)
+  minRR: number              // 0.3–1.2 — ratio riesgo:beneficio mínimo (auto-ajustable)
   lastUpdated: number
 }
 
@@ -58,6 +62,10 @@ export const DEFAULT_WEIGHTS: BrainWeights = {
   orderBlockWeight: 1.0,
   fundingWeight: 1.0,
   minWickPct: 0.08,
+  tp1HoldRate: 0.5,
+  tp2HoldRate: 0.5,
+  wyckoffWeight: 1.0,
+  minRR: 0.7,
   lastUpdated: 0,
 }
 

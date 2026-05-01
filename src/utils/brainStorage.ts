@@ -4,7 +4,7 @@
  *  para una app web local, tal como indica el CLAUDE.md §arquitectura)
  */
 import type { BrainFile, BrainEntry, BrainWeights, PostMortem, FailedIndicator } from '../types/brain'
-import { EMPTY_BRAIN } from '../types/brain'
+import { EMPTY_BRAIN, DEFAULT_WEIGHTS } from '../types/brain'
 
 const STORAGE_KEY = 'crypto_sentinel_brain_v2'
 
@@ -16,6 +16,8 @@ export function loadBrain(): BrainFile {
     const parsed = JSON.parse(raw) as BrainFile
     // Migración de versiones antiguas
     if (!parsed.version || parsed.version < 2) return structuredClone(EMPTY_BRAIN)
+    // Rellenar campos de pesos que no existían en versiones anteriores
+    parsed.weights = { ...DEFAULT_WEIGHTS, ...parsed.weights }
     return parsed
   } catch {
     return structuredClone(EMPTY_BRAIN)
@@ -96,7 +98,9 @@ export function recordLowScore(score = 0): BrainWeights {
   w.stopHuntWeight   = Math.min(w.stopHuntWeight   * RELAX_STEP, MAX_WEIGHT)
   w.orderBlockWeight = Math.min(w.orderBlockWeight * RELAX_STEP, MAX_WEIGHT)
   w.fundingWeight    = Math.min(w.fundingWeight    * RELAX_STEP, MAX_WEIGHT)
+  w.wyckoffWeight    = Math.min(w.wyckoffWeight    * RELAX_STEP, MAX_WEIGHT)
   w.minWickPct       = Math.max(w.minWickPct       / RELAX_STEP, MIN_WICK_FLOOR)
+  w.minRR            = Math.max(w.minRR            - 0.05, 0.30)  // sequía → exigir menos R:R
   w.lastUpdated      = Date.now()
   brain.weights      = w
   saveBrain(brain)
@@ -113,10 +117,12 @@ export function recordHighScore(): BrainWeights {
   const lerp = (v: number, target: number, step: number) =>
     v > target ? Math.max(target, v * step) : Math.min(target, v / step)
 
-  w.stopHuntWeight   = lerp(w.stopHuntWeight,   1.0, RESTORE_STEP)
-  w.orderBlockWeight = lerp(w.orderBlockWeight, 1.0, RESTORE_STEP)
-  w.fundingWeight    = lerp(w.fundingWeight,    1.0, RESTORE_STEP)
+  w.stopHuntWeight   = lerp(w.stopHuntWeight,   1.0,  RESTORE_STEP)
+  w.orderBlockWeight = lerp(w.orderBlockWeight, 1.0,  RESTORE_STEP)
+  w.fundingWeight    = lerp(w.fundingWeight,    1.0,  RESTORE_STEP)
+  w.wyckoffWeight    = lerp(w.wyckoffWeight,    1.0,  RESTORE_STEP)
   w.minWickPct       = lerp(w.minWickPct,       0.08, RESTORE_STEP)
+  w.minRR            = lerp(w.minRR,            0.70, RESTORE_STEP)  // volver al umbral base
   w.lastUpdated      = Date.now()
   brain.weights      = w
   saveBrain(brain)
@@ -125,6 +131,36 @@ export function recordHighScore(): BrainWeights {
 
 export function loadWeights(): BrainWeights {
   return loadBrain().weights
+}
+
+// ─── Aprendizaje de TPs: registra si el precio continuó al siguiente nivel ────
+const TP_EMA_ALPHA = 0.2   // cada resultado pesa 20% — memoria de ~5 trades
+
+export function recordTpOutcome(level: 'TP1' | 'TP2', hit: boolean): BrainWeights {
+  const brain = loadBrain()
+  const w = { ...brain.weights }
+  const value = hit ? 1.0 : 0.0
+  if (level === 'TP1') {
+    w.tp1HoldRate = w.tp1HoldRate * (1 - TP_EMA_ALPHA) + value * TP_EMA_ALPHA
+  } else {
+    w.tp2HoldRate = w.tp2HoldRate * (1 - TP_EMA_ALPHA) + value * TP_EMA_ALPHA
+  }
+  w.lastUpdated = Date.now()
+  brain.weights = w
+  saveBrain(brain)
+  return w
+}
+
+// ─── Auto-ajuste de R:R: si el bot rechazó una entrada que hubiera ganado ────
+export function recordRrMiss(hit: boolean): BrainWeights {
+  if (!hit) return loadBrain().weights  // rechazada Y habría perdido → no ajustar
+  const brain = loadBrain()
+  const w = { ...brain.weights }
+  w.minRR = Math.max(0.30, w.minRR - 0.05)  // era ganador → relajar exigencia
+  w.lastUpdated = Date.now()
+  brain.weights = w
+  saveBrain(brain)
+  return w
 }
 
 // ─── Añadir entrada ───────────────────────────────────────────────────────────
@@ -182,6 +218,14 @@ export function runPostMortem(
     adjustments.push('Reducir peso al indicador de funding cuando contradice la dirección principal.')
   }
 
+  // Wyckoff: si el stop hunt era débil (score < 25) y el trade falló, es probable
+  // que no hubo un Spring/UTAD real — la entrada fue en falsa ruptura sin barrido.
+  if (entry.scoreBreakdown.stopHuntScore < 25 && Math.abs(pnlPct) > 0.3) {
+    failed.push('wyckoff')
+    lessons.push('Posible entrada sin confirmación Wyckoff — no hubo Spring/UTAD claro antes de la entrada.')
+    adjustments.push('Exigir estructura Spring o UTAD confirmada (mecha + cierre de vuelta) antes de operar.')
+  }
+
   // Si no hay causas claras → falló la estructura general
   if (failed.length === 0) {
     failed.push('estructura')
@@ -211,6 +255,10 @@ export function runPostMortem(
 
   if (failed.includes('funding'))    w.fundingWeight    = clamp(w.fundingWeight    * DECAY, 0.5, 1.5)
   else                               w.fundingWeight    = clamp(w.fundingWeight    * BOOST, 0.5, 1.5)
+
+  // Wyckoff: si falló la estructura de Spring/UTAD, exigir confirmación más estricta
+  if (failed.includes('wyckoff'))    w.wyckoffWeight    = clamp(w.wyckoffWeight    * DECAY, 0.5, 1.5)
+  else                               w.wyckoffWeight    = clamp(w.wyckoffWeight    * BOOST, 0.5, 1.5)
 
   // Endurecer umbral de mecha si el SH fue débil
   if (failed.includes('stopHunt'))   w.minWickPct = clamp(w.minWickPct * 1.1, 0.05, 0.5)
